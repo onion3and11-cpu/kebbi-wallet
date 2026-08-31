@@ -1,5 +1,15 @@
 import React, { useState } from 'react';
-import { Building2, X, PlusCircle, AlertCircle, ArrowDownRight, CheckCircle2 } from 'lucide-react';
+import {
+  Building2,
+  X,
+  PlusCircle,
+  AlertCircle,
+  ArrowDownRight,
+  CheckCircle2,
+} from 'lucide-react';
+
+import { ref, get, update } from 'firebase/database';
+import { database } from '../firebase';
 
 interface BankDepositModalProps {
   isOpen: boolean;
@@ -27,39 +37,83 @@ export const BankDepositModal: React.FC<BankDepositModalProps> = ({
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg('');
+  e.preventDefault();
+  setErrorMsg('');
 
-    const numAmount = Number(amount);
-    if (!numAmount || numAmount <= 0) {
-      setErrorMsg('請輸入有效的存款金額');
-      return;
+  const numAmount = Number(amount);
+
+  if (!numAmount || numAmount <= 0) {
+    setErrorMsg('請輸入有效的存款金額');
+    return;
+  }
+
+  try {
+    setLoading(true);
+
+    // 1. 找目前使用者
+    const userSnapshot = await get(
+      ref(database, `users/${userId}`)
+    );
+
+    if (!userSnapshot.exists()) {
+      throw new Error('找不到使用者資料');
     }
 
-    try {
-      setLoading(true);
-      const res = await fetch('/api/v1/bank/deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          amount: numAmount,
-        }),
-      });
+    const user = userSnapshot.val();
 
-      const data = await res.json();
-      if (data.success) {
-        onSuccess(data.newBankBalance, data.message);
-        onClose();
-      } else {
-        setErrorMsg(data.message || '存款失敗');
-      }
-    } catch (err: any) {
-      setErrorMsg('連線異常，請稍後再試');
-    } finally {
-      setLoading(false);
+    if (!user.linked_bank?.account_number) {
+      throw new Error('尚未綁定模擬銀行');
     }
-  };
+
+    const accountNumber =
+      String(user.linked_bank.account_number);
+
+    // 2. 找模擬銀行
+    const bankSnapshot = await get(
+      ref(database, `mock_banks/${accountNumber}`)
+    );
+
+    if (!bankSnapshot.exists()) {
+      throw new Error('找不到模擬銀行帳戶');
+    }
+
+    const bank = bankSnapshot.val();
+
+    const currentBalance = Number(
+      bank.mock_bank_balance ?? 0
+    );
+
+    const newBankBalance =
+      currentBalance + numAmount;
+
+    // 3. 同步更新兩份銀行餘額
+    await update(ref(database), {
+      [`mock_banks/${accountNumber}/mock_bank_balance`]:
+        newBankBalance,
+
+      [`mock_banks/${accountNumber}/mock_bank_balance_cents`]:
+        Math.round(newBankBalance * 100),
+
+      [`users/${userId}/linked_bank/mock_bank_balance`]:
+        newBankBalance,
+
+      [`users/${userId}/linked_bank/mock_bank_balance_cents`]:
+        Math.round(newBankBalance * 100),
+    });
+
+    onSuccess(
+      newBankBalance,
+      `成功存入模擬銀行 $${numAmount}`
+    );
+
+    onClose();
+  } catch (err: any) {
+    console.error('Firebase bank deposit error:', err);
+    setErrorMsg(err?.message || '銀行存款失敗');
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">

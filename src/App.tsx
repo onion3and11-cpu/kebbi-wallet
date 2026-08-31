@@ -6,13 +6,24 @@ import { RoflowSpecViewer } from './components/RoflowSpecViewer';
 import { QrDisplayScreen } from './components/QrDisplayScreen';
 export default function App() {
   // If opening QR Display route
-  if (
-  typeof window !== 'undefined' &&
-  window.location.pathname.startsWith(
-    `${import.meta.env.BASE_URL}qr/`
-  )
-) {
-  return <QrDisplayScreen />;
+  if (typeof window !== 'undefined') {
+  const params =
+    new URLSearchParams(
+      window.location.search
+    );
+
+  const isQrPath =
+    window.location.pathname.startsWith(
+      `${import.meta.env.BASE_URL}qr/`
+    );
+
+  const isQrQuery =
+    params.get('view') === 'qr' &&
+    !!params.get('order_id');
+
+  if (isQrPath || isQrQuery) {
+    return <QrDisplayScreen />;
+  }
 }
 
   const [viewMode, setViewMode] = useState<'mobile' | 'split' | 'pos'>('mobile');

@@ -10,8 +10,12 @@ import {
   Clock,
   Sparkles,
   Volume2,
+  ScanLine,
 } from 'lucide-react';
 import { MOCK_MENU, MenuItem } from '../data/mockMenu';
+import { ref, push, set, get, update } from 'firebase/database';
+import { database } from '../firebase';
+import QRCode from 'qrcode';
 
 interface KebbiRobotPOSProps {
   onOrderCreated?: (qrToken: string) => void;
@@ -24,6 +28,8 @@ export const KebbiRobotPOS: React.FC<KebbiRobotPOSProps> = ({ onOrderCreated }) 
   const [kebbiMood, setKebbiMood] = useState<'IDLE' | 'WAITING_PAYMENT' | 'HAPPY' | 'SERVED'>('IDLE');
   const [speechText, setSpeechText] = useState('您好！我是凱比機器人，請點擊餐點開始為您服務喔！');
   const [isPolling, setIsPolling] = useState(false);
+  const [customerPaymentCode, setCustomerPaymentCode] = useState('');
+  const [isCodePaying, setIsCodePaying] = useState(false);
 
   const robotId = 'KEBBI_ROBOT_001';
 
@@ -57,65 +63,376 @@ export const KebbiRobotPOS: React.FC<KebbiRobotPOSProps> = ({ onOrderCreated }) 
 
   // Submit Order & Generate QR Code
   const handleCreateOrder = async () => {
-    if (cart.length === 0) return;
+  if (cart.length === 0) return;
+
+  try {
+    // Firebase 自動產生訂單 ID
+    const orderRef = push(ref(database, 'orders'));
+
+    if (!orderRef.key) {
+      throw new Error('無法產生 Firebase 訂單編號');
+    }
+
+    const orderId = orderRef.key;
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const expiresAt = new Date(nowMs + 3 * 60 * 1000).toISOString();
+
+    const orderData = {
+      robot_id: robotId,
+      total_amount: totalCartAmount,
+      total_amount_cents: Math.round(totalCartAmount * 100),
+
+      status: 'PENDING',
+
+      // 現在 QR Code 直接放 order_id
+      qr_code_token: orderId,
+
+      items: cart.map((c) => ({
+        name: c.item.name,
+        quantity: c.quantity,
+        price: c.item.price,
+      })),
+
+      created_at: now,
+      expires_at: expiresAt,
+    };
+
+    // 寫入 Firebase
+    await set(orderRef, orderData);
+    await set(
+  ref(database, `robots/${robotId}/latest_order`),
+  {
+    order_id: orderId,
+    status: 'PENDING',
+    created_at: now,
+    expires_at: expiresAt,
+  }
+);
+
+    // 在瀏覽器直接產生 QR Code
+    const qrCodeImage = await QRCode.toDataURL(orderId, {
+      width: 400,
+      margin: 2,
+      color: {
+        dark: '#000000',
+        light: '#ffffff',
+      },
+    });
+
+    const displayOrder = {
+      ...orderData,
+      order_id: orderId,
+      id: orderId,
+      qr_code_image_base64: qrCodeImage,
+    };
+
+    setActiveOrder(displayOrder);
+    setOrderStatus('PENDING');
+    setKebbiMood('WAITING_PAYMENT');
+
+    setSpeechText(
+      '訂單已建立！請使用手機電子錢包掃描螢幕上的 QR Code 完成結帳喔！'
+    );
+
+    // 傳給手機錢包區
+    if (onOrderCreated) {
+      onOrderCreated(orderId);
+    }
+  } catch (err) {
+    console.error('Firebase create order error:', err);
+
+    setSpeechText(
+      '訂單建立失敗，請檢查 Firebase 連線。'
+    );
+  }
+};
+
+  const handleCustomerCodePayment = async () => {
+    const paymentCode = customerPaymentCode.trim();
+
+    if (!paymentCode) {
+      setSpeechText('請先掃描或輸入顧客付款碼。');
+      return;
+    }
+
+    if (cart.length === 0 || totalCartAmount <= 0) {
+      setSpeechText('請先選擇餐點，再掃描顧客付款碼。');
+      return;
+    }
 
     try {
-      const res = await fetch('/api/v1/web/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          robot_id: robotId,
-          total_amount: totalCartAmount,
-          items: cart.map((c) => ({
-            name: c.item.name,
-            quantity: c.quantity,
-            price: c.item.price,
-          })),
-        }),
-      });
+      setIsCodePaying(true);
 
-      const data = await res.json();
-      if (data.success) {
-        setActiveOrder(data.data);
-        setOrderStatus('PENDING');
-        setKebbiMood('WAITING_PAYMENT');
-        setSpeechText('訂單已建立！請使用手機電子錢包掃描螢幕上的 QR Code 完成結帳喔！');
+      const codeSnapshot = await get(
+        ref(database, `payment_codes/${paymentCode}`)
+      );
 
-        if (onOrderCreated) {
-          onOrderCreated(data.data.qr_code_token);
-        }
+      if (!codeSnapshot.exists()) {
+        throw new Error('找不到此付款碼');
       }
-    } catch (err) {
-      console.error('Failed to create order:', err);
+
+      const codeData = codeSnapshot.val();
+
+      if (codeData.status !== 'ACTIVE') {
+        throw new Error('此付款碼已失效或已使用');
+      }
+
+      if (
+        codeData.expires_at &&
+        new Date(codeData.expires_at).getTime() < Date.now()
+      ) {
+        await update(ref(database, `payment_codes/${paymentCode}`), {
+          status: 'EXPIRED',
+          expired_at: new Date().toISOString(),
+        });
+        throw new Error('此付款碼已逾時，請顧客重新出示');
+      }
+
+      const payerUserId = Number(codeData.user_id);
+
+      if (!payerUserId) {
+        throw new Error('付款碼沒有有效的使用者資料');
+      }
+
+      const userSnapshot = await get(
+        ref(database, `users/${payerUserId}`)
+      );
+
+      if (!userSnapshot.exists()) {
+        throw new Error('找不到付款使用者');
+      }
+
+      const user = userSnapshot.val();
+      const amount = totalCartAmount;
+      const balanceBefore = Number(user.balance ?? 0);
+
+      let balanceAfterRecharge = balanceBefore;
+      let autoRechargeAmount = 0;
+      let bankBalanceAfter: number | null = null;
+      let accountNumber = '';
+
+      const updates: Record<string, any> = {};
+      const nowMs = Date.now();
+const now = new Date(nowMs).toISOString();
+const expiresAt = new Date(
+  nowMs + 3 * 60 * 1000
+).toISOString();
+
+      if (balanceBefore < amount) {
+        const linkedBank = user.linked_bank;
+
+        if (
+          !linkedBank ||
+          !linkedBank.account_number ||
+          linkedBank.is_verified !== true
+        ) {
+          throw new Error('錢包餘額不足，且尚未綁定模擬銀行');
+        }
+
+        accountNumber = String(linkedBank.account_number);
+        const shortfall = amount - balanceBefore;
+        autoRechargeAmount = Math.ceil(shortfall / 1000) * 1000;
+
+        const bankSnapshot = await get(
+          ref(database, `mock_banks/${accountNumber}`)
+        );
+
+        if (!bankSnapshot.exists()) {
+          throw new Error('找不到綁定的模擬銀行帳戶');
+        }
+
+        const bank = bankSnapshot.val();
+        const bankBalance = Number(bank.mock_bank_balance ?? 0);
+
+        if (bankBalance < autoRechargeAmount) {
+          throw new Error(
+            `模擬銀行餘額不足，需要自動加值 $${autoRechargeAmount}`
+          );
+        }
+
+        bankBalanceAfter = bankBalance - autoRechargeAmount;
+        balanceAfterRecharge = balanceBefore + autoRechargeAmount;
+
+        updates[`mock_banks/${accountNumber}/mock_bank_balance`] =
+          bankBalanceAfter;
+        updates[`mock_banks/${accountNumber}/mock_bank_balance_cents`] =
+          Math.round(bankBalanceAfter * 100);
+        updates[
+          `users/${payerUserId}/linked_bank/mock_bank_balance`
+        ] = bankBalanceAfter;
+        updates[
+          `users/${payerUserId}/linked_bank/mock_bank_balance_cents`
+        ] = Math.round(bankBalanceAfter * 100);
+
+        const autoTxnRef = push(
+          ref(database, `transactions/${payerUserId}`)
+        );
+
+        if (!autoTxnRef.key) {
+          throw new Error('無法建立自動加值交易紀錄');
+        }
+
+        updates[`transactions/${payerUserId}/${autoTxnRef.key}`] = {
+          user_id: payerUserId,
+          amount: autoRechargeAmount,
+          amount_cents: Math.round(autoRechargeAmount * 100),
+          type: 'AUTO_RECHARGE',
+          note: '付款碼消費餘額不足自動加值',
+          created_at: now,
+        };
+      }
+
+      const finalBalance = balanceAfterRecharge - amount;
+
+      const orderRef = push(ref(database, 'orders'));
+      const paymentTxnRef = push(
+        ref(database, `transactions/${payerUserId}`)
+      );
+
+      if (!orderRef.key || !paymentTxnRef.key) {
+        throw new Error('無法建立訂單或付款交易紀錄');
+      }
+
+      const orderId = orderRef.key;
+      const orderData = {
+        robot_id: robotId,
+        total_amount: amount,
+        total_amount_cents: Math.round(amount * 100),
+        status: 'PAID',
+        payment_method: 'CUSTOMER_PAYMENT_CODE',
+        payment_code: paymentCode,
+        user_id: payerUserId,
+        items: cart.map((c) => ({
+          name: c.item.name,
+          quantity: c.quantity,
+          price: c.item.price,
+        })),
+        created_at: now,
+        paid_at: now,
+      };
+
+      updates[`users/${payerUserId}/balance`] = finalBalance;
+      updates[`orders/${orderId}`] = orderData;
+      updates[`payment_codes/${paymentCode}/status`] = 'USED';
+      updates[`payment_codes/${paymentCode}/used_at`] = now;
+      updates[`payment_codes/${paymentCode}/used_order_id`] = orderId;
+      updates[`transactions/${payerUserId}/${paymentTxnRef.key}`] = {
+        user_id: payerUserId,
+        order_id: orderId,
+        amount,
+        amount_cents: Math.round(amount * 100),
+        type: 'PAYMENT',
+        note: '店家掃描付款碼消費',
+        created_at: now,
+      };
+
+      await update(ref(database), updates);
+
+      setActiveOrder({
+        ...orderData,
+        order_id: orderId,
+        id: orderId,
+      });
+      setOrderStatus('PAID');
+      setKebbiMood('HAPPY');
+      setSpeechText(
+        autoRechargeAmount > 0
+          ? `🎉 付款成功！已自動加值 $${autoRechargeAmount} 並完成 $${amount} 扣款。`
+          : `🎉 付款成功！已從顧客錢包扣款 $${amount}。`
+      );
+      setCustomerPaymentCode('');
+    } catch (err: any) {
+      console.error('Customer payment code error:', err);
+      setSpeechText(err?.message || '付款碼扣款失敗');
+    } finally {
+      setIsCodePaying(false);
     }
   };
 
   // NUWA Kebbi Roflow Polling Loop Simulator (Every 1.5 Seconds)
   useEffect(() => {
-    if (!activeOrder || orderStatus !== 'PENDING') return;
+  if (!activeOrder || orderStatus !== 'PENDING') {
+    return;
+  }
 
-    setIsPolling(true);
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/v1/web/orders/status/${activeOrder.order_id}`);
-        const data = await res.json();
+  setIsPolling(true);
 
-        if (data.success && data.data) {
-          if (data.data.status === 'PAID') {
-            setOrderStatus('PAID');
-            setKebbiMood('HAPPY');
-            setSpeechText('🎉 付款成功！感謝您的訂購，餐點正在現做中！請至取餐口等候呼叫。');
-            setIsPolling(false);
-            clearInterval(interval);
-          }
-        }
-      } catch (err) {
-        console.error('Roflow polling error:', err);
+  const interval = setInterval(async () => {
+    try {
+      const orderSnapshot = await get(
+        ref(
+          database,
+          `orders/${activeOrder.order_id}`
+        )
+      );
+
+      if (!orderSnapshot.exists()) {
+        console.error('Firebase order not found');
+        return;
       }
-    }, 1500);
 
-    return () => clearInterval(interval);
-  }, [activeOrder, orderStatus]);
+      const orderData = orderSnapshot.val();
+      if (
+        orderData.status === 'PENDING' &&
+        orderData.expires_at &&
+        Date.now() >= new Date(orderData.expires_at).getTime()
+      ) {
+        const expiredAt = new Date().toISOString();
+        const latestSnapshot = await get(
+          ref(database, `robots/${robotId}/latest_order`)
+        );
+
+        const updatesOnExpire: Record<string, any> = {
+          [`orders/${activeOrder.order_id}/status`]: 'EXPIRED',
+          [`orders/${activeOrder.order_id}/expired_at`]: expiredAt,
+        };
+
+        if (
+          latestSnapshot.exists() &&
+          latestSnapshot.val()?.order_id === activeOrder.order_id
+        ) {
+          updatesOnExpire[`robots/${robotId}/latest_order/status`] = 'EXPIRED';
+          updatesOnExpire[`robots/${robotId}/latest_order/expired_at`] = expiredAt;
+        }
+
+        await update(ref(database), updatesOnExpire);
+
+        setOrderStatus('EXPIRED');
+        setKebbiMood('IDLE');
+        setSpeechText(
+          '此訂單付款時間已超過 3 分鐘，訂單已失效，請重新點餐。'
+        );
+        setIsPolling(false);
+
+        clearInterval(interval);
+        return;
+      }
+
+      if (orderData.status === 'PAID') {
+        setOrderStatus('PAID');
+
+        setKebbiMood('HAPPY');
+
+        setSpeechText(
+          '🎉 付款成功！感謝您的訂購，餐點正在現做中！請至取餐口等候呼叫。'
+        );
+
+        setIsPolling(false);
+
+        clearInterval(interval);
+      }
+    } catch (err) {
+      console.error(
+        'Firebase order polling error:',
+        err
+      );
+    }
+  }, 1500);
+
+  return () => {
+    clearInterval(interval);
+  };}, [activeOrder, orderStatus]);
 
   const resetOrder = () => {
     setCart([]);
@@ -223,6 +540,26 @@ export const KebbiRobotPOS: React.FC<KebbiRobotPOSProps> = ({ onOrderCreated }) 
           </div>
         )}
       </div>
+      {orderStatus === 'EXPIRED' && (
+  <div className="mt-4 w-full p-4 bg-red-950/80 border border-red-500/40 rounded-2xl flex flex-col items-center text-red-200">
+    <Clock className="w-12 h-12 text-red-400 mb-2" />
+
+    <h4 className="font-bold text-sm text-white">
+      訂單已逾時
+    </h4>
+
+    <p className="text-xs text-red-300 mt-1">
+      超過 3 分鐘未完成付款
+    </p>
+
+    <button
+      onClick={resetOrder}
+      className="mt-4 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-bold text-xs rounded-xl"
+    >
+      重新點餐
+    </button>
+  </div>
+)}
 
       {/* POS Menu & Cart Selection Area */}
       <div className="w-full md:w-2/3 flex flex-col justify-between">
@@ -330,6 +667,38 @@ export const KebbiRobotPOS: React.FC<KebbiRobotPOSProps> = ({ onOrderCreated }) 
               <QrCode className="w-5 h-5" />
               <span>送出點餐並產生付款 QR Code</span>
             </button>
+          </div>
+
+          <div className="mt-4 p-3 bg-slate-950/70 border border-slate-800 rounded-2xl">
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-300 mb-2">
+              <ScanLine className="w-4 h-4 text-emerald-400" />
+              店家掃描顧客付款碼（專題模擬）
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={customerPaymentCode}
+                onChange={(e) => setCustomerPaymentCode(e.target.value)}
+                placeholder="掃描或貼上 PAY-... 付款碼"
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white outline-none focus:border-emerald-500"
+              />
+              <button
+                onClick={handleCustomerCodePayment}
+                disabled={
+                  cart.length === 0 ||
+                  !customerPaymentCode.trim() ||
+                  isCodePaying ||
+                  orderStatus !== 'IDLE'
+                }
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                <ScanLine className="w-4 h-4" />
+                {isCodePaying ? '扣款中...' : '掃付款碼並扣款'}
+              </button>
+            </div>
+            <p className="mt-2 text-[10px] text-slate-500">
+              條碼槍可直接輸入付款碼；此功能只操作 Firebase 專題模擬錢包，不涉及真實金流。
+            </p>
           </div>
         </div>
       </div>

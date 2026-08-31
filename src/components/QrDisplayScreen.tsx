@@ -1,10 +1,44 @@
-import React, { useEffect, useState } from 'react';
-import { CheckCircle2, Clock, Bot, RefreshCw } from 'lucide-react';
+import React, {
+  useEffect,
+  useState,
+} from 'react';
+
+import {
+  CheckCircle2,
+  Clock,
+  Bot,
+  RefreshCw,
+} from 'lucide-react';
+
 import QRCode from 'qrcode';
 
+import {
+  ref,
+  get,
+  update,
+} from 'firebase/database';
+
+import { database } from '../firebase';
+
 export const QrDisplayScreen: React.FC = () => {
-  const pathParts = window.location.pathname.split('/');
-  const orderId = pathParts[pathParts.length - 1] || '';
+  const searchParams =
+  new URLSearchParams(
+    window.location.search
+  );
+
+const queryOrderId =
+  searchParams.get('order_id') || '';
+
+const pathParts =
+  window.location.pathname.split('/');
+
+const pathOrderId =
+  window.location.pathname.includes('/qr/')
+    ? pathParts[pathParts.length - 1]
+    : '';
+
+const orderId =
+  queryOrderId || pathOrderId;
 
   const [order, setOrder] = useState<any | null>(null);
   const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
@@ -13,35 +47,88 @@ export const QrDisplayScreen: React.FC = () => {
 
   // Fetch Order Details
   const fetchOrder = async () => {
-    if (!orderId) {
-      setError('無效的訂單編號');
-      setLoading(false);
-      return;
+  if (!orderId) {
+    setError('無效的訂單編號');
+    setLoading(false);
+    return;
+  }
+
+  try {
+    const orderSnapshot = await get(
+      ref(
+        database,
+        `orders/${orderId}`
+      )
+    );
+
+    if (!orderSnapshot.exists()) {
+      throw new Error(
+        `找不到訂單 ID: ${orderId}`
+      );
     }
 
-    try {
-      const res = await fetch(`/api/v1/robot/orders/status/${orderId}`);
-      if (!res.ok) {
-        throw new Error(`找不到訂單 ID: ${orderId}`);
-      }
-      const json = await res.json();
-      const orderData = json.data || json;
-      setOrder(orderData);
+    const firebaseOrder =
+      orderSnapshot.val();
+      if (
+  firebaseOrder.status === 'PENDING' &&
+  firebaseOrder.expires_at &&
+  Date.now() >=
+    new Date(firebaseOrder.expires_at).getTime()
+) {
+  const expiredAt = new Date().toISOString();
 
-      if (orderData.qr_code_token) {
-        const url = await QRCode.toDataURL(orderData.qr_code_token, {
+  await update(
+    ref(database, `orders/${orderId}`),
+    {
+      status: 'EXPIRED',
+      expired_at: expiredAt,
+    }
+  );
+
+  firebaseOrder.status = 'EXPIRED';
+  firebaseOrder.expired_at = expiredAt;
+}
+
+    const orderData = {
+      id: orderId,
+      order_id: orderId,
+      ...firebaseOrder,
+    };
+
+    setOrder(orderData);
+
+    // QR 內容現在直接就是 order_id
+    const qrContent =
+      firebaseOrder.qr_code_token ||
+      orderId;
+
+    const url =
+      await QRCode.toDataURL(
+        qrContent,
+        {
           width: 400,
           margin: 2,
-          color: { dark: '#000000', light: '#ffffff' },
-        });
-        setQrCodeDataUrl(url);
-      }
-    } catch (err: any) {
-      setError(err.message || '無法載入訂單');
-    } finally {
-      setLoading(false);
-    }
-  };
+
+          color: {
+            dark: '#000000',
+            light: '#ffffff',
+          },
+        }
+      );
+
+    setQrCodeDataUrl(url);
+
+    setError('');
+
+  } catch (err: any) {
+    setError(
+      err.message ||
+        '無法載入 Firebase 訂單'
+    );
+  } finally {
+    setLoading(false);
+  }
+};
 
   useEffect(() => {
     fetchOrder();
@@ -74,6 +161,7 @@ export const QrDisplayScreen: React.FC = () => {
   }
 
   const isPaid = order.status === 'PAID';
+  const isExpired = order.status === 'EXPIRED';
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 select-none">
@@ -93,7 +181,19 @@ export const QrDisplayScreen: React.FC = () => {
         </div>
 
         {/* QR Code or Success Animation */}
-        {!isPaid ? (
+        {isExpired ? (
+          <div className="py-8 space-y-4 w-full flex flex-col items-center">
+            <Clock className="w-20 h-20 text-red-400" />
+            <div>
+              <h2 className="text-2xl font-black text-red-400">
+                訂單已逾時
+              </h2>
+              <p className="text-xs text-slate-300 mt-1">
+                超過 3 分鐘未付款，請重新建立訂單
+              </p>
+            </div>
+          </div>
+        ) : !isPaid ? (
           <div className="space-y-4 w-full flex flex-col items-center">
             <div className="p-3 bg-white rounded-3xl shadow-xl border-4 border-emerald-500/80 inline-block">
               {qrCodeDataUrl ? (

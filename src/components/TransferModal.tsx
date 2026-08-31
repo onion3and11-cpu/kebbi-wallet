@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Send, Smartphone, ShieldCheck, X, AlertCircle } from 'lucide-react';
+import { ref, get, update, push } from 'firebase/database';
+import { database } from '../firebase';
 
 interface TransferModalProps {
   isOpen: boolean;
@@ -23,50 +25,131 @@ export const TransferModal: React.FC<TransferModalProps> = ({
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg('');
+  e.preventDefault();
+  setErrorMsg('');
 
-    if (!recipientPhone.trim()) {
-      setErrorMsg('請輸入收款人手機號碼');
-      return;
+  const phone = recipientPhone.trim();
+  const transferAmount = Number(amount);
+
+  if (!phone) {
+    setErrorMsg('請輸入收款人手機號碼');
+    return;
+  }
+
+  if (!transferAmount || transferAmount <= 0) {
+    setErrorMsg('請輸入有效的轉帳金額');
+    return;
+  }
+
+  if (paymentPin.trim() !== '1234') {
+    setErrorMsg('支付 PIN 碼錯誤');
+    return;
+  }
+
+  try {
+    setLoading(true);
+
+    // 1. 讀取付款人
+    const senderRef = ref(database, `users/${userId}`);
+    const senderSnapshot = await get(senderRef);
+
+    if (!senderSnapshot.exists()) {
+      throw new Error('找不到目前使用者');
     }
 
-    if (!amount || Number(amount) <= 0) {
-      setErrorMsg('請輸入有效的轉帳金額');
-      return;
+    const sender = senderSnapshot.val();
+    const senderBalance = Number(sender.balance ?? 0);
+
+    if (senderBalance < transferAmount) {
+      throw new Error('錢包餘額不足');
     }
 
-    if (!paymentPin || paymentPin.length !== 4) {
-      setErrorMsg('請輸入 4 位數支付密碼');
-      return;
+    // 2. 搜尋收款人的手機號碼
+    const usersSnapshot = await get(ref(database, 'users'));
+
+    if (!usersSnapshot.exists()) {
+      throw new Error('找不到使用者資料');
     }
 
-    try {
-      setLoading(true);
-      const res = await fetch('/api/v1/wallet/transfer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          recipient_phone: recipientPhone.trim(),
-          payment_pin: paymentPin,
-          amount: Number(amount),
-        }),
-      });
+    const users = usersSnapshot.val();
 
-      const data = await res.json();
-      if (data.success) {
-        onSuccess(data.newBalance, data.message);
-        onClose();
-      } else {
-        setErrorMsg(data.message || '轉帳失敗');
-      }
-    } catch (err: any) {
-      setErrorMsg('連線異常，請稍後再試');
-    } finally {
-      setLoading(false);
+    const recipientEntry = Object.entries(users).find(
+      ([id, value]: [string, any]) =>
+        String(value?.phone ?? '') === phone
+    );
+
+    if (!recipientEntry) {
+      throw new Error('找不到此手機號碼的使用者');
     }
-  };
+
+    const [recipientId, recipient] = recipientEntry as [string, any];
+
+    if (String(recipientId) === String(userId)) {
+      throw new Error('不能轉帳給自己');
+    }
+
+    const recipientBalance = Number(recipient.balance ?? 0);
+
+    const senderBalanceAfter = senderBalance - transferAmount;
+    const recipientBalanceAfter = recipientBalance + transferAmount;
+
+    const now = new Date().toISOString();
+
+    // 3. 建立雙方交易紀錄
+    const senderTxnRef = push(
+      ref(database, `transactions/${userId}`)
+    );
+
+    const recipientTxnRef = push(
+      ref(database, `transactions/${recipientId}`)
+    );
+
+    if (!senderTxnRef.key || !recipientTxnRef.key) {
+      throw new Error('無法建立交易紀錄');
+    }
+
+    // 4. 一次更新 Firebase
+    await update(ref(database), {
+      [`users/${userId}/balance`]: senderBalanceAfter,
+
+      [`users/${recipientId}/balance`]: recipientBalanceAfter,
+
+      [`transactions/${userId}/${senderTxnRef.key}`]: {
+        user_id: userId,
+        amount: transferAmount,
+        amount_cents: Math.round(transferAmount * 100),
+        type: 'TRANSFER_OUT',
+        note: `轉帳給 ${phone}`,
+        recipient_user_id: recipientId,
+        recipient_phone: phone,
+        created_at: now,
+      },
+
+      [`transactions/${recipientId}/${recipientTxnRef.key}`]: {
+        user_id: Number(recipientId),
+        amount: transferAmount,
+        amount_cents: Math.round(transferAmount * 100),
+        type: 'TRANSFER_IN',
+        note: `收到 ${sender.phone ?? '好友'} 的轉帳`,
+        sender_user_id: userId,
+        sender_phone: sender.phone ?? '',
+        created_at: now,
+      },
+    });
+
+    onSuccess(
+      senderBalanceAfter,
+      `成功轉帳 $${transferAmount} 給 ${phone}`
+    );
+
+    onClose();
+  } catch (err: any) {
+    console.error('Firebase transfer error:', err);
+    setErrorMsg(err?.message || '轉帳失敗');
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">

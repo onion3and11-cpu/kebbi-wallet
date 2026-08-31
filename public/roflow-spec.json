@@ -1,83 +1,47 @@
 {
-  "system": "NUWA Kebbi Robot Ordering & E-Wallet Integration Specification",
-  "version": "1.0.0",
-  "target_robot": "NUWA Kebbi Air / Kebbi Fluffy / Kebbi Premier",
-  "roflow_module": "API_REST_Module",
-  "base_url": "https://<YOUR_APP_DOMAIN>",
-  "endpoints": {
-    "create_order": {
-      "method": "POST",
-      "path": "/api/v1/robot/orders",
-      "description": "凱比機器人點餐完成後呼叫，建立待繳費訂單並取得 QR Code Data",
-      "headers": {
-        "Content-Type": "application/json",
-        "X-Robot-ID": "{{ROBOT_ID}}"
-      },
-      "request_body": {
-        "robot_id": "KEBBI_ROBOT_001",
-        "total_amount": 350.00,
-        "items": [
-          { "name": "經典雙層起司牛肉堡", "quantity": 1, "price": 220.00 },
-          { "name": "特級珍珠奶茶", "quantity": 1, "price": 80.00 },
-          { "name": "黃金脆薯 (大)", "quantity": 1, "price": 50.00 }
-        ]
-      },
-      "response_success": {
-        "success": true,
-        "data": {
-          "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "total_amount": 350.00,
-          "qr_code_token": "KEBBI_PAY_TOK_9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "qr_code_image_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-          "status": "PENDING",
-          "created_at": "2026-07-28T18:45:00.000Z"
-        }
-      }
+  "system": "NUWA Kebbi + Firebase Realtime Database",
+  "version": "3.0.0",
+  "base_url": "https://kebbi-wallet-default-rtdb.asia-southeast1.firebasedatabase.app",
+
+  "create_order": {
+    "method": "POST",
+    "url": "https://kebbi-wallet-default-rtdb.asia-southeast1.firebasedatabase.app/orders.json",
+    "headers": {
+      "Content-Type": "application/json"
     },
-    "poll_order_status": {
-      "method": "GET",
-      "path": "/api/v1/robot/orders/status/{{order_id}}",
-      "description": "凱比 Roflow [API 輪詢模組] 循環呼叫 (建議頻率: 每 1.5 秒次)，監聽顧客手機掃碼付款狀態",
-      "headers": {
-        "Content-Type": "application/json"
-      },
-      "url_parameters": {
-        "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123"
-      },
-      "response_success": {
-        "success": true,
-        "data": {
-          "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "status": "PAID",
-          "total_amount": 350.00,
-          "paid_at": "2026-07-28T18:45:15.000Z",
-          "transaction_id": 1082
+    "body": {
+      "robot_id": "KEBBI_ROBOT_001",
+      "total_amount": 100,
+      "status": "PENDING",
+      "items": [
+        {
+          "name": "餐點",
+          "quantity": 1,
+          "price": 100
         }
-      },
-      "roflow_flow_mapping": {
-        "PENDING": {
-          "action": "CONTINUE_POLLING",
-          "kebbi_expression": "WAITING_PAYMENT",
-          "kebbi_tts": "請使用手機點開電子錢包掃描螢幕上的 QR Code 完成結帳喔！"
-        },
-        "PAID": {
-          "action": "STOP_POLLING_AND_NEXT_NODE",
-          "kebbi_expression": "HAPPY_DANCE",
-          "kebbi_motion": "HAPPY_WAVE_HANDS",
-          "kebbi_tts": "付款成功！感謝您的訂購，餐點正在為您現做中！"
-        },
-        "EXPIRED": {
-          "action": "STOP_POLLING_AND_CANCEL",
-          "kebbi_expression": "SAD",
-          "kebbi_tts": "訂單已逾時，請重新點餐。"
-        }
-      }
+      ]
+    },
+    "response_mapping": {
+      "name": "order_id"
     }
   },
-  "polling_configuration": {
-    "interval_ms": 1500,
-    "timeout_seconds": 180,
-    "max_retries": 120,
-    "on_timeout_action": "CANCEL_ORDER"
+
+  "check_order": {
+    "method": "GET",
+    "url": "https://kebbi-wallet-default-rtdb.asia-southeast1.firebasedatabase.app/orders/{{order_id}}.json",
+    "response_mapping": {
+      "status": "order_status"
+    },
+    "statuses": [
+      "PENDING",
+      "PAID",
+      "EXPIRED"
+    ]
+  },
+
+  "qr_code": {
+    "content": "{{order_id}}",
+    "image_url": "https://quickchart.io/qr?size=300&text={{order_id}}"
   }
 }
+

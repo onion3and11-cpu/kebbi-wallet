@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Wallet, X, ArrowUpRight } from 'lucide-react';
+import { ref, get, update, push } from 'firebase/database';
+import { database } from '../firebase';
 
 interface RechargeModalProps {
   isOpen: boolean;
@@ -22,34 +24,118 @@ export const RechargeModal: React.FC<RechargeModalProps> = ({
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
+  e.preventDefault();
+  setLoading(true);
+  setError(null);
 
-    try {
-      const res = await fetch('/api/v1/wallet/recharge', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          payment_pin: pin.trim(),
-          amount: Number(amount),
-        }),
-      });
+  try {
+    const rechargeAmount = Number(amount);
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.message || '手動加值失敗');
-      }
-
-      onSuccess(data.newBalance, data.message);
-      onClose();
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+    if (!rechargeAmount || rechargeAmount <= 0) {
+      throw new Error('請輸入有效的儲值金額');
     }
-  };
+
+    if (pin.trim() !== '1234') {
+      throw new Error('支付 PIN 碼錯誤');
+    }
+
+    // 1. 讀取使用者
+    const userRef = ref(database, `users/${userId}`);
+    const userSnapshot = await get(userRef);
+
+    if (!userSnapshot.exists()) {
+      throw new Error('找不到使用者');
+    }
+
+    const user = userSnapshot.val();
+
+    if (!user.linked_bank?.account_number) {
+      throw new Error('請先綁定模擬銀行帳戶');
+    }
+
+    const accountNumber = String(
+      user.linked_bank.account_number
+    );
+
+    // 2. 讀取真正的模擬銀行帳戶
+    const bankRef = ref(
+      database,
+      `mock_banks/${accountNumber}`
+    );
+
+    const bankSnapshot = await get(bankRef);
+
+    if (!bankSnapshot.exists()) {
+      throw new Error('找不到模擬銀行帳戶');
+    }
+
+    const bank = bankSnapshot.val();
+
+    const walletBalance = Number(user.balance ?? 0);
+    const bankBalance = Number(
+      bank.mock_bank_balance ?? 0
+    );
+
+    if (bankBalance < rechargeAmount) {
+      throw new Error('模擬銀行帳戶餘額不足');
+    }
+
+    const newWalletBalance =
+      walletBalance + rechargeAmount;
+
+    const newBankBalance =
+      bankBalance - rechargeAmount;
+
+    const now = new Date().toISOString();
+
+    const transactionRef = push(
+      ref(database, `transactions/${userId}`)
+    );
+
+    if (!transactionRef.key) {
+      throw new Error('無法建立交易紀錄');
+    }
+
+    // 3. 銀行扣錢 + 錢包加錢
+    await update(ref(database), {
+      [`users/${userId}/balance`]:
+        newWalletBalance,
+
+      [`users/${userId}/linked_bank/mock_bank_balance`]:
+        newBankBalance,
+
+      [`users/${userId}/linked_bank/mock_bank_balance_cents`]:
+        Math.round(newBankBalance * 100),
+
+      [`mock_banks/${accountNumber}/mock_bank_balance`]:
+        newBankBalance,
+
+      [`mock_banks/${accountNumber}/mock_bank_balance_cents`]:
+        Math.round(newBankBalance * 100),
+
+      [`transactions/${userId}/${transactionRef.key}`]: {
+        user_id: userId,
+        amount: rechargeAmount,
+        amount_cents: Math.round(rechargeAmount * 100),
+        type: 'MANUAL_RECHARGE',
+        note: '由綁定模擬銀行手動儲值',
+        created_at: now,
+      },
+    });
+
+    onSuccess(
+      newWalletBalance,
+      `手動儲值 $${rechargeAmount} 成功`
+    );
+
+    onClose();
+  } catch (err: any) {
+    console.error('Firebase recharge error:', err);
+    setError(err?.message || '手動儲值失敗');
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">

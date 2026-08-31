@@ -1,239 +1,278 @@
 import React, { useState } from 'react';
-import { FileJson, Database, Copy, Check, Layers, Terminal, Play, Zap, CheckCircle2, AlertTriangle, CreditCard } from 'lucide-react';
+import { FileJson, Database, Copy, Check, Layers, Terminal, Play, Zap, CheckCircle2, CreditCard } from 'lucide-react';
 
 export const RoflowSpecViewer: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'tester' | 'roflow' | 'sql'>('tester');
   const [copied, setCopied] = useState(false);
 
   // Live API Tester State - Pure dynamic origin without hardcoding
-  const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  const baseUrl =
+  'https://kebbi-wallet-default-rtdb.asia-southeast1.firebasedatabase.app';
   const [testAmount, setTestAmount] = useState('100');
   const [testRobotId, setTestRobotId] = useState('KEBBI_ROBOT_001');
-  const [testPin, setTestPin] = useState('1234');
   const [apiLoading, setApiLoading] = useState(false);
   const [apiResponse, setApiResponse] = useState<any | null>(null);
   const [lastOrderId, setLastOrderId] = useState<string>('');
-  const [lastQrToken, setLastQrToken] = useState<string>('');
 
-  const curlCreateOrder = `curl -X POST "${baseUrl}/api/v1/robot/orders" \\
+  const curlCreateOrder = `curl -X POST "${baseUrl}/orders.json" \\
   -H "Content-Type: application/json" \\
-  -H "X-Roflow-Key: <ROFLOW_TOKEN>" \\
-  -H "X-Robot-ID: ${testRobotId}" \\
-  -d '{"robot_id": "${testRobotId}", "total_amount": ${testAmount || '100'}, "items": [{"name": "凱比特調漢堡", "quantity": 1, "price": ${testAmount || '100'}}]}'`;
+  -d '{"robot_id":"${testRobotId}","total_amount":${testAmount || '100'},"status":"PENDING","items":[{"name":"凱比特調漢堡","quantity":1,"price":${testAmount || '100'}}]}'`;
 
   const curlCheckStatus = lastOrderId
-    ? `curl -X GET "${baseUrl}/api/v1/robot/orders/status?order_id=${lastOrderId}" \\
-  -H "X-Roflow-Key: <ROFLOW_TOKEN>"`
-    : `curl -X GET "${baseUrl}/api/v1/robot/orders/status?order_id={{ORDER_ID}}" \\
-  -H "X-Roflow-Key: <ROFLOW_TOKEN>"`;
+  ? `curl -X GET "${baseUrl}/orders/${lastOrderId}.json"`
+  : `curl -X GET "${baseUrl}/orders/{{ORDER_ID}}.json"`;
 
-  const curlWalletPay = `curl -X POST "${baseUrl}/api/v1/wallet/pay" \\
+  const curlWalletPay = lastOrderId
+  ? `curl -X PATCH "${baseUrl}/orders/${lastOrderId}.json" \\
   -H "Content-Type: application/json" \\
-  -d '{"user_id": 1, "qr_code_token": "${lastQrToken || 'KEBBI_PAY_TOK_...'}", "pin": "${testPin || '1234'}"}'`;
+  -d '{"status":"PAID"}'`
+  : `curl -X PATCH "${baseUrl}/orders/{{ORDER_ID}}.json" \\
+  -H "Content-Type: application/json" \\
+  -d '{"status":"PAID"}'`;
 
   const handleRunApiTest = async () => {
-    setApiLoading(true);
-    setApiResponse(null);
-    try {
-      const res = await fetch('/api/v1/web/orders', {
+  setApiLoading(true);
+  setApiResponse(null);
+
+  try {
+    const amount = Number(testAmount || 100);
+
+    const res = await fetch(
+      `${baseUrl}/orders.json`,
+      {
         method: 'POST',
+
         headers: {
           'Content-Type': 'application/json',
-          'X-Robot-ID': testRobotId,
         },
+
         body: JSON.stringify({
           robot_id: testRobotId,
-          total_amount: Number(testAmount || 100),
-          items: [{ name: '凱比特調點餐', quantity: 1, price: Number(testAmount || 100) }],
-        }),
-      });
 
-      const json = await res.json();
-      setApiResponse({ status: res.status, data: json });
-      if (json?.data?.order_id) {
-        setLastOrderId(json.data.order_id);
+          total_amount: amount,
+
+          total_amount_cents:
+            Math.round(amount * 100),
+
+          status: 'PENDING',
+
+          items: [
+            {
+              name: '凱比特調點餐',
+              quantity: 1,
+              price: amount,
+            },
+          ],
+
+          created_at:
+            new Date().toISOString(),
+        }),
       }
-      if (json?.data?.qr_code_token) {
-        setLastQrToken(json.data.qr_code_token);
-      }
-    } catch (err: any) {
-      setApiResponse({ error: err.message || '連線失敗' });
-    } finally {
-      setApiLoading(false);
+    );
+
+    const json = await res.json();
+
+    setApiResponse({
+      status: res.status,
+      data: json,
+    });
+
+    // Firebase POST 回傳：
+    // { "name": "-Oxxxxxxx" }
+
+    if (json?.name) {
+      setLastOrderId(json.name);
     }
-  };
+
+  } catch (err: any) {
+    setApiResponse({
+      error:
+        err.message || 'Firebase 連線失敗',
+    });
+  } finally {
+    setApiLoading(false);
+  }
+};
 
   const handleRunStatusTest = async () => {
-    if (!lastOrderId) return;
-    setApiLoading(true);
-    try {
-      const res = await fetch(`/api/v1/web/orders/status?order_id=${lastOrderId}`);
-      const json = await res.json();
-      setApiResponse({ status: res.status, data: json });
-    } catch (err: any) {
-      setApiResponse({ error: err.message || '連線失敗' });
-    } finally {
-      setApiLoading(false);
-    }
-  };
+  if (!lastOrderId) return;
+
+  setApiLoading(true);
+
+  try {
+    const res = await fetch(
+      `${baseUrl}/orders/${lastOrderId}.json`
+    );
+
+    const json = await res.json();
+
+    setApiResponse({
+      status: res.status,
+      data: json,
+    });
+
+  } catch (err: any) {
+    setApiResponse({
+      error:
+        err.message || 'Firebase 連線失敗',
+    });
+  } finally {
+    setApiLoading(false);
+  }
+};
 
   const handleRunPayTest = async () => {
-    if (!lastQrToken) return;
-    setApiLoading(true);
-    try {
-      const res = await fetch('/api/v1/wallet/pay', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+  if (!lastOrderId) return;
+
+  setApiLoading(true);
+
+  try {
+    const res = await fetch(
+      `${baseUrl}/orders/${lastOrderId}.json`,
+      {
+        method: 'PATCH',
+
+        headers: {
+          'Content-Type': 'application/json',
+        },
+
         body: JSON.stringify({
-          user_id: 1,
-          qr_code_token: lastQrToken,
-          pin: testPin,
+          status: 'PAID',
+          paid_at:
+            new Date().toISOString(),
         }),
-      });
-      const json = await res.json();
-      setApiResponse({ status: res.status, data: json });
-    } catch (err: any) {
-      setApiResponse({ error: err.message || '連線失敗' });
-    } finally {
-      setApiLoading(false);
-    }
-  };
+      }
+    );
+
+    const json = await res.json();
+
+    setApiResponse({
+      status: res.status,
+      data: json,
+      note:
+        '此按鈕僅模擬 PAID，不會真正扣除錢包餘額',
+    });
+
+  } catch (err: any) {
+    setApiResponse({
+      error:
+        err.message || 'Firebase 更新失敗',
+    });
+  } finally {
+    setApiLoading(false);
+  }
+};
 
   const roflowJson = `{
-  "system": "NUWA Kebbi Robot & E-Wallet REST API Specification",
-  "version": "2.0.0",
-  "cors_enabled": true,
+  "system": "NUWA Kebbi + Firebase Realtime Database",
+  "version": "3.0.0",
+
   "base_url": "${baseUrl}",
-  "endpoints": {
-    "create_order": {
-      "method": "POST",
-      "path": "/api/v1/robot/orders",
-      "headers": {
-        "Content-Type": "application/json",
-        "X-Roflow-Key": "<ROFLOW_TOKEN>",
-        "X-Robot-ID": "{{ROBOT_ID}}"
-      },
-      "request_body": {
-        "robot_id": "KEBBI_ROBOT_001",
-        "total_amount": 100.00,
-        "items": [{ "name": "經典套餐", "quantity": 1, "price": 100.00 }]
-      },
-      "response_format": {
-        "success": true,
-        "data": {
-          "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "qr_code_token": "KEBBI_PAY_TOK_9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "qr_code_image_base64": "data:image/png;base64,...",
-          "status": "PENDING",
-          "total_amount": 100.00,
-          "robot_id": "KEBBI_ROBOT_001"
-        },
-        "error": null
-      }
+
+  "create_order": {
+    "method": "POST",
+    "url": "${baseUrl}/orders.json",
+
+    "headers": {
+      "Content-Type": "application/json"
     },
-    "poll_order_status": {
-      "method": "GET",
-      "path": "/api/v1/robot/orders/status?order_id={{order_id}}",
-      "alternative_path": "/api/v1/robot/orders/status/{{order_id}}",
-      "headers": {
-        "X-Roflow-Key": "<ROFLOW_TOKEN>"
-      },
-      "response_format": {
-        "success": true,
-        "data": {
-          "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "total_amount": 100.00,
-          "status": "PENDING"
-        },
-        "error": null
-      },
-      "polling_config": {
-        "interval_ms": 1500,
-        "timeout_seconds": 180
-      }
+
+    "body": {
+      "robot_id": "KEBBI_ROBOT_001",
+      "total_amount": 100,
+      "status": "PENDING",
+
+      "items": [
+        {
+          "name": "餐點",
+          "quantity": 1,
+          "price": 100
+        }
+      ]
     },
-    "wallet_pay": {
-      "method": "POST",
-      "path": "/api/v1/wallet/pay",
-      "headers": { "Content-Type": "application/json" },
-      "request_body": {
-        "user_id": 1,
-        "qr_code_token": "KEBBI_PAY_TOK_9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-        "pin": "1234"
-      },
-      "response_format": {
-        "success": true,
-        "data": {
-          "order_id": "9b1deb4d-3b7d-4bad-9bd2-2ca771600123",
-          "status": "PAID",
-          "paid_amount": 100.00,
-          "wallet_balance_before": 150.00,
-          "wallet_balance_after": 50.00,
-          "auto_recharged": false,
-          "auto_recharge_amount": 0,
-          "transaction_id": 1
-        },
-        "error": null
-      }
+
+    "firebase_response": {
+      "name": "-Oxxxxxxxxxxxxxxxx"
     },
-    "health_check": {
-      "method": "GET",
-      "path": "/api/health",
-      "response_format": {
-        "status": "ok"
-      }
+
+    "roflow_mapping": {
+      "name": "order_id"
     }
+  },
+
+  "qr_code": {
+    "content": "{{order_id}}",
+    "image_url": "https://quickchart.io/qr?size=300&text={{order_id}}"
+  },
+
+  "check_order": {
+    "method": "GET",
+    "url": "${baseUrl}/orders/{{order_id}}.json",
+
+    "roflow_mapping": {
+      "status": "order_status"
+    },
+
+    "statuses": [
+      "PENDING",
+      "PAID",
+      "EXPIRED"
+    ]
   }
 }`;
 
-  const sqlSchema = `-- NUWA Kebbi Robot E-Wallet Database Schema (Cloudflare D1 / SQLite)
--- 包含原子事務、整數分 (Cents) 儲存與 CHECK 約束保護
+  const firebaseSchema = `{
+  "users": {
+    "1": {
+      "name": "Onion",
+      "phone": "0912345678",
+      "balance": 500,
+      "linked_bank": {
+        "account_number": "8220011223344",
+        "is_verified": true,
+        "mock_bank_balance": 50000
+      }
+    }
+  },
 
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    payment_pin_hash TEXT NOT NULL,
-    balance_cents INTEGER NOT NULL DEFAULT 15000 CHECK (balance_cents >= 0),
-    is_auto_recharge_enabled INTEGER NOT NULL DEFAULT 1 CHECK (is_auto_recharge_enabled IN (0, 1)),
-    failed_pin_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+  "orders": {
+    "-Oxxxxxxxx": {
+      "robot_id": "KEBBI_ROBOT_001",
+      "total_amount": 100,
+      "total_amount_cents": 10000,
+      "status": "PENDING",
+      "items": [
+        {
+          "name": "餐點",
+          "quantity": 1,
+          "price": 100
+        }
+      ],
+      "created_at": "ISO_DATE"
+    }
+  },
 
-CREATE TABLE IF NOT EXISTS mock_bank_accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    bank_code TEXT NOT NULL DEFAULT '822',
-    account_number TEXT UNIQUE NOT NULL,
-    bank_password_hash TEXT NOT NULL,
-    mock_bank_balance_cents INTEGER NOT NULL DEFAULT 5000000 CHECK (mock_bank_balance_cents >= 0),
-    is_verified INTEGER NOT NULL DEFAULT 1 CHECK (is_verified IN (0, 1)),
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+  "transactions": {
+    "1": {
+      "-Otransaction": {
+        "type": "PAYMENT",
+        "amount": 100,
+        "amount_cents": 10000,
+        "order_id": "-Oxxxxxxxx",
+        "created_at": "ISO_DATE"
+      }
+    }
+  },
 
-CREATE TABLE IF NOT EXISTS orders (
-    id TEXT PRIMARY KEY,
-    robot_id TEXT NOT NULL,
-    total_amount_cents INTEGER NOT NULL CHECK (total_amount_cents > 0),
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PAID', 'EXPIRED')),
-    qr_code_token TEXT UNIQUE NOT NULL,
-    items_json TEXT,
-    paid_at TEXT,
-    expires_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    amount_cents INTEGER NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('PAYMENT', 'MANUAL_RECHARGE', 'AUTO_RECHARGE', 'TRANSFER_OUT', 'TRANSFER_IN')),
-    mock_bank_account_id INTEGER REFERENCES mock_bank_accounts(id) ON DELETE SET NULL,
-    note TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);`;
+  "mock_banks": {
+    "8220011223344": {
+      "owner_user_id": 1,
+      "mock_bank_balance": 50000,
+      "mock_bank_balance_cents": 5000000,
+      "is_verified": true
+    }
+  }
+}`;
 
   const copyContent = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -285,7 +324,7 @@ CREATE TABLE IF NOT EXISTS transactions (
             }`}
           >
             <Database className="w-3.5 h-3.5" />
-            PostgreSQL Schema
+            Firebase Schema
           </button>
         </div>
       </div>
@@ -296,7 +335,7 @@ CREATE TABLE IF NOT EXISTS transactions (
           <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl text-xs space-y-2 text-slate-300">
             <div className="flex items-center gap-2 font-bold text-indigo-300 text-sm">
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span>目前服務端 API 基礎網址 (動態解析)：</span>
+              <span>Firebase Realtime Database API 基礎網址：</span>
             </div>
             <div className="flex items-center gap-1.5">
               <input
@@ -379,40 +418,33 @@ CREATE TABLE IF NOT EXISTS transactions (
               </div>
             </div>
 
-            {/* Step 3: Wallet Pay */}
+            {/* Step 3: Simulate PAID Status */}
             <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-3">
               <h4 className="font-bold text-xs text-amber-300 flex items-center gap-1.5">
-                <CreditCard className="w-4 h-4 text-amber-400" /> 3. 錢包付款 (POST)
+                <CreditCard className="w-4 h-4 text-amber-400" /> 3. 模擬付款狀態 (PATCH)
               </h4>
+              <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                除錯用途：只會把 Firebase 訂單狀態改成 PAID，不會扣除錢包或模擬銀行餘額。
+              </p>
               <div className="space-y-2 text-xs">
                 <div>
-                  <label className="text-slate-400 text-[11px]">QR Token</label>
+                  <label className="text-slate-400 text-[11px]">訂單 ID (order_id)</label>
                   <input
                     type="text"
-                    value={lastQrToken}
-                    onChange={(e) => setLastQrToken(e.target.value)}
+                    value={lastOrderId}
+                    onChange={(e) => setLastOrderId(e.target.value)}
                     placeholder="建單後自動帶入"
-                    className="w-full mt-1 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1 font-mono text-white text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="text-slate-400 text-[11px]">PIN 碼</label>
-                  <input
-                    type="password"
-                    maxLength={4}
-                    value={testPin}
-                    onChange={(e) => setTestPin(e.target.value)}
                     className="w-full mt-1 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1 font-mono text-white text-xs"
                   />
                 </div>
 
                 <button
                   onClick={handleRunPayTest}
-                  disabled={apiLoading || !lastQrToken}
+                  disabled={apiLoading || !lastOrderId}
                   className="w-full mt-2 py-2 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer text-xs disabled:opacity-50"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>{apiLoading ? '扣款中...' : '模擬付款'}</span>
+                  <span>{apiLoading ? '更新中...' : '模擬 PAID'}</span>
                 </button>
               </div>
             </div>
@@ -455,7 +487,7 @@ CREATE TABLE IF NOT EXISTS transactions (
       {(activeTab === 'roflow' || activeTab === 'sql') && (
         <div className="mt-4 relative">
           <button
-            onClick={() => copyContent(activeTab === 'roflow' ? roflowJson : sqlSchema)}
+            onClick={() => copyContent(activeTab === 'roflow' ? roflowJson : firebaseSchema)}
             className="absolute top-3 right-3 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl border border-slate-700 flex items-center gap-1.5 z-10 cursor-pointer"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
@@ -463,7 +495,7 @@ CREATE TABLE IF NOT EXISTS transactions (
           </button>
 
           <pre className="bg-slate-950 p-4 rounded-2xl text-xs font-mono text-emerald-400 overflow-x-auto max-h-[380px] leading-relaxed border border-slate-800/80">
-            <code>{activeTab === 'roflow' ? roflowJson : sqlSchema}</code>
+            <code>{activeTab === 'roflow' ? roflowJson : firebaseSchema}</code>
           </pre>
         </div>
       )}

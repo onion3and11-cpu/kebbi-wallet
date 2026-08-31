@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import JsBarcode from 'jsbarcode';
 import { RefreshCw, ShieldCheck, X, Zap } from 'lucide-react';
+import { ref, set, update } from 'firebase/database';
+import { database } from '../firebase';
 
 interface BarcodePaymentModalProps {
   isOpen: boolean;
@@ -15,41 +17,106 @@ export const BarcodePaymentModal: React.FC<BarcodePaymentModalProps> = ({
   userId,
 }) => {
   const [countdown, setCountdown] = useState(30);
-  const [barcodeCode, setBarcodeCode] = useState('9928-8812-4019-5501');
+  const [barcodeCode, setBarcodeCode] = useState('');
   const [qrBase64, setQrBase64] = useState<string>('');
   const [useExternalApi, setUseExternalApi] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
+
   const barcodeSvgRef = useRef<SVGSVGElement | null>(null);
+  const activeCodeRef = useRef<string>('');
+
+  const expireCode = async (code: string) => {
+    if (!code) return;
+
+    try {
+      await update(ref(database, `payment_codes/${code}`), {
+        status: 'EXPIRED',
+        expired_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error('Failed to expire payment code:', err);
+    }
+  };
+
+  const generateNewBarcode = async () => {
+    setCodeError(null);
+
+    const oldCode = activeCodeRef.current;
+    if (oldCode) {
+      await expireCode(oldCode);
+    }
+
+    const randomSuffix = Math.floor(100000 + Math.random() * 900000);
+    const code = `PAY-${userId}-${Date.now()}-${randomSuffix}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30_000);
+
+    try {
+      await set(ref(database, `payment_codes/${code}`), {
+        payment_code: code,
+        user_id: userId,
+        status: 'ACTIVE',
+        created_at: now.toISOString(),
+        expires_at: expiresAt.toISOString(),
+      });
+
+      activeCodeRef.current = code;
+      setBarcodeCode(code);
+
+      const base64 = await QRCode.toDataURL(code, {
+        margin: 1,
+        width: 280,
+        errorCorrectionLevel: 'M',
+        color: {
+          dark: '#000000',
+          light: '#ffffff',
+        },
+      });
+
+      setQrBase64(base64);
+    } catch (err) {
+      console.error('Failed to create Firebase payment code:', err);
+      setCodeError('付款碼建立失敗，請檢查 Firebase 連線');
+    }
+  };
 
   useEffect(() => {
     if (!isOpen) return;
 
     setCountdown(30);
-    generateNewBarcode();
+    void generateNewBarcode();
 
     const timer = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
-          generateNewBarcode();
+          void generateNewBarcode();
           return 30;
         }
         return prev - 1;
       });
     }, 1000);
 
-    return () => clearInterval(timer);
-  }, [isOpen]);
+    return () => {
+      clearInterval(timer);
+      const codeToExpire = activeCodeRef.current;
+      activeCodeRef.current = '';
+      if (codeToExpire) {
+        void expireCode(codeToExpire);
+      }
+    };
+  }, [isOpen, userId]);
 
   useEffect(() => {
     if (barcodeSvgRef.current && barcodeCode && isOpen && !useExternalApi) {
       try {
-        JsBarcode(barcodeSvgRef.current, barcodeCode.replace(/-/g, ''), {
+        JsBarcode(barcodeSvgRef.current, barcodeCode, {
           format: 'CODE128',
-          width: 2,
+          width: 1.5,
           height: 60,
           displayValue: true,
           fontOptions: 'bold',
           font: 'monospace',
-          fontSize: 12,
+          fontSize: 10,
           margin: 6,
           background: '#ffffff',
           lineColor: '#000000',
@@ -60,30 +127,8 @@ export const BarcodePaymentModal: React.FC<BarcodePaymentModalProps> = ({
     }
   }, [barcodeCode, isOpen, useExternalApi]);
 
-  const generateNewBarcode = async () => {
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const code = `9928-8812-4019-${randomSuffix}`;
-    setBarcodeCode(code);
-
-    try {
-      // Generate crisp monochrome high-contrast QR code matching standard specs
-      const base64 = await QRCode.toDataURL(code, {
-        margin: 1,
-        width: 280,
-        errorCorrectionLevel: 'M',
-        color: {
-          dark: '#000000',
-          light: '#ffffff',
-        },
-      });
-      setQrBase64(base64);
-    } catch (err) {
-      console.error('Failed to generate QR Code:', err);
-    }
-  };
-
   const externalBarcodeUrl = `https://bwipjs-api.metafloor.com/?bcid=code128&text=${encodeURIComponent(
-    barcodeCode.replace(/-/g, '')
+    barcodeCode
   )}&scale=3&rotate=N&includetext`;
 
   const externalQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(
@@ -104,19 +149,19 @@ export const BarcodePaymentModal: React.FC<BarcodePaymentModalProps> = ({
 
         <div className="flex items-center gap-2 bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 px-3 py-1 rounded-full text-xs font-bold mb-3">
           <ShieldCheck className="w-4 h-4 text-emerald-500" />
-          <span>出示付款碼 (LINE Pay / Google Pay / 支付寶)</span>
+          <span>專題模擬付款碼</span>
         </div>
 
-        <p className="text-xs text-slate-500 mb-3">請將此付款條碼/QR Code 對準店家掃描器</p>
+        <p className="text-xs text-slate-500 mb-3">
+          請將此付款條碼 / QR Code 對準專題模擬店家掃描器
+        </p>
 
-        {/* Real 1D Barcode & B&W 2D QR Code Display */}
         <div className="bg-white p-4 rounded-2xl border-2 border-slate-200 shadow-inner w-full flex flex-col items-center my-1">
-          {/* Real Scannable 1D Barcode (Code128 - Barcode Ocean / QuickMark standard) */}
           <div className="w-full bg-white p-2 border border-slate-200 rounded-xl flex flex-col items-center justify-center min-h-[90px]">
             {useExternalApi ? (
               <img
                 src={externalBarcodeUrl}
-                alt="Barcode Ocean / BWIP Style Code128 Barcode"
+                alt="Code128 Payment Barcode"
                 className="max-h-20 w-full object-contain"
                 style={{ imageRendering: 'pixelated' }}
               />
@@ -127,19 +172,18 @@ export const BarcodePaymentModal: React.FC<BarcodePaymentModalProps> = ({
 
           <div className="my-3 border-t border-slate-200 w-full" />
 
-          {/* High-Contrast Standard Monochrome 2D QR Code */}
           <div className="bg-white p-2 border-2 border-slate-900 rounded-lg shadow-xs flex flex-col items-center">
             {useExternalApi ? (
               <img
                 src={externalQrUrl}
-                alt="External QuickMark Style QR Code"
+                alt="Payment QR Code"
                 className="w-44 h-44 object-contain"
                 style={{ imageRendering: 'pixelated' }}
               />
             ) : qrBase64 ? (
               <img
                 src={qrBase64}
-                alt="Sharp B&W Payment QR Code"
+                alt="Payment QR Code"
                 className="w-44 h-44 object-contain"
                 style={{ imageRendering: 'pixelated' }}
               />
@@ -155,23 +199,28 @@ export const BarcodePaymentModal: React.FC<BarcodePaymentModalProps> = ({
               onClick={() => setUseExternalApi(!useExternalApi)}
               className="text-[10px] text-blue-600 dark:text-blue-400 font-bold hover:underline cursor-pointer"
             >
-              {useExternalApi
-                ? '切換為本地極速 1D/2D 產碼引擎 (JsBarcode + QRCode)'
-                : '切換為外部 Barcode Ocean / QuickMark API 產碼'}
+              {useExternalApi ? '切換成本地產碼' : '切換為外部產碼 API'}
             </button>
           </div>
         </div>
 
-        {/* Countdown timer */}
+        {codeError && (
+          <div className="mt-3 w-full p-3 bg-red-50 dark:bg-red-950/60 rounded-xl border border-red-200 dark:border-red-800 text-[11px] text-red-700 dark:text-red-300">
+            {codeError}
+          </div>
+        )}
+
         <div className="flex items-center gap-2 mt-3 text-xs font-mono text-slate-600 dark:text-slate-300">
           <RefreshCw className="w-3.5 h-3.5 text-blue-500 animate-spin" />
-          <span>條碼每 30 秒自動更新：</span>
+          <span>付款碼每 30 秒自動更新：</span>
           <span className="font-bold text-blue-600 dark:text-blue-400">{countdown}s</span>
         </div>
 
         <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-950/60 rounded-xl border border-blue-200 dark:border-blue-800 text-[11px] text-blue-800 dark:text-blue-300 flex items-center gap-2">
           <Zap className="w-4 h-4 text-blue-500 flex-shrink-0" />
-          <span>支援店家一維紅光條碼槍與 QR Code 槍掃描，餘額不足自動啟動模擬銀行 $1,000 自動加值扣款。</span>
+          <span>
+            每組付款碼會同步寫入 Firebase，店家掃描後才能進行專題模擬扣款；這不是 LINE Pay、Google Pay 或支付寶的正式付款碼。
+          </span>
         </div>
       </div>
     </div>
